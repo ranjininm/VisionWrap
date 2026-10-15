@@ -73,6 +73,9 @@ DEFAULT_STATE = {
     "visionwrap_pending_packaging": None,
     "visionwrap_pending_product": None,
     "visionwrap_finalized_record_id": None,
+    "visionwrap_transfer_completed_id": None,
+    "visionwrap_transfer_completed_name": None,
+    "visionwrap_transfer_completed_zone": None,
     "visionwrap_route": [],
     "visionwrap_blocked_cells": set(),
     "visionwrap_start_cell": (0, 0),
@@ -470,6 +473,9 @@ def set_current_product(product, source_image=None, record_id=None):
     st.session_state.visionwrap_pending_packaging = None
     st.session_state.visionwrap_pending_product = None
     st.session_state.visionwrap_finalized_record_id = None
+    st.session_state.visionwrap_transfer_completed_id = None
+    st.session_state.visionwrap_transfer_completed_name = None
+    st.session_state.visionwrap_transfer_completed_zone = None
     st.session_state.visionwrap_last_error = None
 
 
@@ -1731,74 +1737,148 @@ elif page == "Packaging Review":
             except Exception as exc:
                 st.error(f"Could not finalize packaging: {exc}")
 
-        # Warehouse transfer is separate from finalization.
-
+        # Show the exact finalized configuration on the page and make it downloadable.
         finalized_id = st.session_state.visionwrap_finalized_record_id
+        pending_product = (
+            st.session_state.visionwrap_pending_product or result
+        )
+        pending_packaging = (
+            st.session_state.visionwrap_pending_packaging
+            or pending_product.get("packaging", {})
+        )
 
-        if finalized_id is not None:
+        if finalized_id is not None and pending_product:
             st.divider()
+            section_title(
+                "Finalized Packaging Configuration",
+                "These are the saved values after your edits. Download this configuration before transferring it to the warehouse.",
+            )
 
+            cfg1, cfg2, cfg3 = st.columns(3)
+            with cfg1:
+                render_metric("PRODUCT", safe_text(pending_product.get("product_name"), "Unknown"), "Finalized record")
+            with cfg2:
+                render_metric("BOX", safe_text(pending_packaging.get("recommended_box"), "Not specified"), "Recommended box")
+            with cfg3:
+                render_metric("FRAGILITY", safe_text(pending_product.get("fragility"), "unknown"), "Assessment")
+
+            preview_left, preview_right = st.columns(2)
+            with preview_left:
+                st.markdown("#### Materials and protection")
+                st.write(f"**Outer material:** {safe_text(pending_packaging.get('outer_material'), 'Not specified')}")
+                st.write(f"**Cushioning:** {safe_text(pending_packaging.get('cushioning'), 'Not specified')}")
+                st.write(f"**Void fill:** {safe_text(pending_packaging.get('void_fill'), 'Not specified')}")
+                st.write(f"**Orientation:** {safe_text(pending_packaging.get('orientation'), 'Not specified')}")
+                render_list("Protection features", pending_packaging.get("protection_features", []))
+            with preview_right:
+                st.markdown("#### Final instructions")
+                st.write(f"**Reasoning:** {safe_text(pending_packaging.get('reasoning'), 'Not provided')}")
+                st.write(f"**Sustainability tip:** {safe_text(pending_packaging.get('sustainability_tip'), 'Not provided')}")
+                render_list("Packing steps", pending_product.get("packing_steps", []))
+                render_list("Warnings", pending_product.get("warnings", []))
+
+            export_payload = {
+                "project": "VisionWrap",
+                "record_id": finalized_id,
+                "workflow_status": "finalized_pending_warehouse_transfer",
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "product": {
+                    "product_name": pending_product.get("product_name"),
+                    "product_category": pending_product.get("product_category"),
+                    "description": pending_product.get("description"),
+                    "visible_material": pending_product.get("visible_material"),
+                    "confidence": pending_product.get("confidence"),
+                    "fragility": pending_product.get("fragility"),
+                    "estimated_size_class": pending_product.get("estimated_size_class"),
+                    "dimensions_cm": pending_product.get("dimensions_cm"),
+                    "weight_g": pending_product.get("weight_g"),
+                },
+                # Keep the original dictionary intact so savings_analysis is not lost.
+                "packaging": pending_packaging,
+                "risk_factors": pending_product.get("risk_factors", []),
+                "packing_steps": pending_product.get("packing_steps", []),
+                "warnings": pending_product.get("warnings", []),
+                "confirmed": pending_product.get("confirmed", True),
+            }
+            st.download_button(
+                "⬇️ Download Finalized Configuration (JSON)",
+                data=json.dumps(export_payload, indent=2, ensure_ascii=False, default=str),
+                file_name=f"visionwrap_product_{finalized_id}_finalized.json",
+                mime="application/json",
+                use_container_width=True,
+                key=f"visionwrap_final_config_download_{finalized_id}",
+            )
+
+            st.divider()
             section_title(
                 "Warehouse Transfer",
-                "Your packaging configuration has been finalized. "
-                "Choose a zone to transfer the product.",
+                "Your packaging configuration is finalized. Choose a zone to transfer the product.",
             )
-
-            pending_product = (
-                st.session_state.visionwrap_pending_product
-                or result
-            )
-
-            suggested_zone = choose_storage_zone(
-                pending_product
-            )
-
-            zone_index = (
-                STORAGE_ZONES.index(suggested_zone)
-                if suggested_zone in STORAGE_ZONES
-                else 0
-            )
-
+            suggested_zone = choose_storage_zone(pending_product)
+            zone_index = STORAGE_ZONES.index(suggested_zone) if suggested_zone in STORAGE_ZONES else 0
             selected_zone = st.selectbox(
                 "Destination storage zone",
                 STORAGE_ZONES,
                 index=zone_index,
                 key="visionwrap_transfer_zone",
             )
-
             st.info(
-                "The suggested zone is a starting point based on "
-                "the product assessment. Confirm that the actual "
-                "warehouse location is suitable before transferring."
+                "The suggested zone is a starting point based on the product assessment. "
+                "Confirm that the actual warehouse location is suitable before transferring."
             )
 
             if st.button(
-                "Transfer to Warehouse",
+                "📦 Transfer to Warehouse",
                 type="primary",
                 use_container_width=True,
+                key=f"visionwrap_transfer_button_{finalized_id}",
             ):
                 try:
-                    db.transfer_to_warehouse(
-                        finalized_id,
-                        selected_zone,
-                    )
-
-                    st.success(
-                        f"Product #{finalized_id} transferred to "
-                        f"{selected_zone}."
-                    )
-
+                    db.transfer_to_warehouse(finalized_id, selected_zone)
+                    st.session_state.visionwrap_transfer_completed_id = finalized_id
+                    st.session_state.visionwrap_transfer_completed_name = safe_text(pending_product.get("product_name"), f"Product #{finalized_id}")
+                    st.session_state.visionwrap_transfer_completed_zone = selected_zone
                     st.session_state.visionwrap_finalized_record_id = None
                     st.session_state.visionwrap_pending_packaging = None
                     st.session_state.visionwrap_pending_product = None
                     st.session_state.visionwrap_record_to_edit = None
-
                     st.rerun()
-
                 except Exception as exc:
-                    st.error(
-                        f"Warehouse transfer failed: {exc}"
-                    )
+                    st.error(f"Warehouse transfer failed: {exc}")
+
+        # This confirmation persists after rerun so the user can navigate immediately.
+        completed_id = st.session_state.visionwrap_transfer_completed_id
+        if completed_id is not None:
+            st.divider()
+            st.success(
+                f"✅ {st.session_state.visionwrap_transfer_completed_name or f'Product #{completed_id}'} "
+                f"has reached the warehouse and was assigned to "
+                f"{st.session_state.visionwrap_transfer_completed_zone or 'its storage zone'}."
+            )
+            nav_col1, nav_col2 = st.columns(2)
+            with nav_col1:
+                if st.button(
+                    "🏭 View Warehouse",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"visionwrap_view_warehouse_{completed_id}",
+                ):
+                    st.session_state.visionwrap_transfer_completed_id = None
+                    st.session_state.visionwrap_transfer_completed_name = None
+                    st.session_state.visionwrap_transfer_completed_zone = None
+                    navigate_to("Warehouse & Routes")
+                    st.rerun()
+            with nav_col2:
+                if st.button(
+                    "↩️ Back to Dashboard",
+                    use_container_width=True,
+                    key=f"visionwrap_back_dashboard_{completed_id}",
+                ):
+                    st.session_state.visionwrap_transfer_completed_id = None
+                    st.session_state.visionwrap_transfer_completed_name = None
+                    st.session_state.visionwrap_transfer_completed_zone = None
+                    navigate_to("Overview")
+                    st.rerun()
 
 
 # =========================================================
