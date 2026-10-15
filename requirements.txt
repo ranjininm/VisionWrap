@@ -1,0 +1,11 @@
+streamlit
+opencv-python
+numpy
+pillow
+pandas
+torch
+transformers
+python-dotenv
+google-genai
+openai
+anthropic
